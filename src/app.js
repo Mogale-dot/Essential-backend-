@@ -26,8 +26,23 @@ const profileRoutes = require("./modules/profile/profile.routes");
 
 const app = express();
 
-// Middleware
-app.use(cors());
+// ========== CORS CONFIGURATION  ==========
+// Allow all origins for testing (Expo Go, different networks, etc.)
+const corsOptions = {
+  origin: '*',  // Allow any origin
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+  exposedHeaders: ['Content-Length', 'X-Requested-With'],
+  preflightContinue: false,
+  optionsSuccessStatus: 204
+};
+
+// Apply CORS middleware
+app.use(cors(corsOptions));
+
+// Handle preflight requests explicitly
+app.options('*', cors(corsOptions));
 app.use(express.json());
 app.use(morgan('dev'));
 
