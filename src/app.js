@@ -5,6 +5,7 @@ const cors = require('cors');
 const morgan = require('morgan');
 
 // Import all route modules
+const oauthRoutes = require('./modules/auth/oauth.routes');
 const authRouter = require('./modules/auth/auth.routes');
 const salonRouter = require('./modules/salons/salon.routes');
 const membersRouter = require('./modules/members/members.routes');
@@ -50,8 +51,10 @@ app.get('/health', (_, res) => res.json({ status: 'ok' }));
 // ========== MOUNT ROUTES ========== 
 
 
+
+app.use('/auth', oauthRoutes);
 // Admin/Salon side routes
-app.use('/auth', authRouter);                 // /auth/login, /auth/signup, /auth/register-salon
+app.use('/auth', authRouter);                  // /auth/login, /auth/signup, /auth/register-salon
 app.use('/salons', salonRouter);               // /salons/my-salon, /salons/:id
 app.use('/members', membersRouter);            // /members, /members/:id/role, etc.
 app.use('/services', servicesRouter);          // /services, /services/bulk
