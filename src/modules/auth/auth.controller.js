@@ -161,6 +161,18 @@ exports.signup = async (req, res, next) => {
  * Login - works for both customers and admins
  * POST /auth/login
  */
+/**
+ * Login - works for email/password users only
+ * Google users must use Google Sign-In
+ * POST /auth/login
+ */
+/**
+ * Login - works for both customers and admins
+ * POST /auth/login
+ * 
+ * Special rule: Admins can use either email/password OR Google
+ * Customers must use the method they signed up with
+ */
 exports.login = async (req, res, next) => {
   const client = await db.pool.connect();
   
@@ -177,7 +189,8 @@ exports.login = async (req, res, next) => {
     await client.query('BEGIN');
 
     const { rows } = await client.query(
-      `SELECT id, name, email, password_hash, role FROM users 
+      `SELECT id, name, email, password_hash, role, auth_provider, google_id 
+       FROM users 
        WHERE email = $1 AND deleted_at IS NULL`,
       [email.toLowerCase()]
     );
@@ -191,13 +204,58 @@ exports.login = async (req, res, next) => {
     }
 
     const user = rows[0];
-    const match = await bcrypt.compare(password, user.password_hash);
 
-    if (!match) {
+    // 🔑 NEW LOGIC: Check if user can use email/password based on role
+    const isAdmin = user.role === 'admin' || user.role === 'member';
+    const isGoogleUser = user.auth_provider === 'google' && user.google_id !== null;
+    const isEmailUser = user.auth_provider === 'local' && user.password_hash !== null;
+    
+    // Case 1: Admin users can ALWAYS use email/password (even if they also have Google linked)
+    if (isAdmin) {
+      // Admins must have a password_hash (they created account with email/password)
+      if (!user.password_hash) {
+        await client.query('ROLLBACK');
+        return res.status(401).json({ 
+          success: false, 
+          message: 'Admin account setup incomplete. Please contact support.' 
+        });
+      }
+      
+      // Verify password
+      const match = await bcrypt.compare(password, user.password_hash);
+      if (!match) {
+        await client.query('ROLLBACK');
+        return res.status(401).json({ 
+          success: false, 
+          message: 'Invalid email or password' 
+        });
+      }
+    } 
+    // Case 2: Customer with Google-only account - REJECT email/password
+    else if (isGoogleUser && !isEmailUser) {
       await client.query('ROLLBACK');
       return res.status(401).json({ 
         success: false, 
-        message: 'Invalid email or password' 
+        message: 'This account uses Google Sign-In. Please use "Continue with Google" to log in.' 
+      });
+    } 
+    // Case 3: Customer with email/password account - normal flow
+    else if (isEmailUser) {
+      const match = await bcrypt.compare(password, user.password_hash);
+      if (!match) {
+        await client.query('ROLLBACK');
+        return res.status(401).json({ 
+          success: false, 
+          message: 'Invalid email or password' 
+        });
+      }
+    } 
+    // Case 4: Fallback - should never happen
+    else {
+      await client.query('ROLLBACK');
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Account configuration error. Please contact support.' 
       });
     }
 
@@ -216,7 +274,6 @@ exports.login = async (req, res, next) => {
     const accessToken = signAccessToken(tokenPayload);
     const refreshToken = signRefreshToken(tokenPayload);
 
-    // ✅ Store refresh token in database
     await client.query(
       `UPDATE users SET refresh_token = $1, last_login_at = NOW() WHERE id = $2`,
       [refreshToken, user.id]
@@ -239,15 +296,15 @@ exports.login = async (req, res, next) => {
         subscription: subscription
       }
     });
+
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('❌ Login error:', err);
-    next(err);
+    next(err); 
   } finally {
     client.release();
   }
 };
-
 /**
  * Register a new salon (creates admin user + salon + trial subscription)
  * POST /auth/register-salon
