@@ -7,6 +7,7 @@ const morgan = require('morgan');
 // Importing  all route modules
 const oauthRoutes = require('./modules/auth/oauth.routes');
 const authRouter = require('./modules/auth/auth.routes');
+const authRouterOtp = require('./modules/reset-password/otp.routes');
 const salonRouter = require('./modules/salons/salon.routes');
 const membersRouter = require('./modules/members/members.routes');
 const servicesRouter = require('./modules/services-rewards/services.routes');
@@ -53,6 +54,7 @@ app.get('/health', (_, res) => res.json({ status: 'ok' }));
 
 
 app.use('/auth', oauthRoutes);
+app.use('/auth', authRouterOtp);
 app.use('/auth', authRouter);                  // /auth/login, /auth/signup, /auth/register-salon
 app.use('/salons', salonRouter);               // /salons/my-salon, /salons/:id
 app.use('/members', membersRouter);            // /members, /members/:id/role, etc.
