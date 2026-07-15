@@ -1,11 +1,6 @@
 const db = require("../../config/db");
 const { cache } = require("../../config/redis");
 
-/**
- * GET /api/feed
- * Customer Feed (Authenticated)
- * Cached for 60 seconds
- */
 exports.getFeed = async (req, res) => {
   try {
     const userId = req.user?.id;
@@ -19,22 +14,19 @@ exports.getFeed = async (req, res) => {
     const { cursor, limit = 10 } = req.query;
     const parsedLimit = Math.min(parseInt(limit) || 10, 20);
 
-    // ✅ Parse cursor (format could be "timestamp:id" or just "timestamp")
+    // Parse cursor
     let cursorTimestamp = null;
     let cursorId = null;
     
     if (cursor) {
       const parts = cursor.split(':');
       if (parts.length >= 2) {
-        // Format: "timestamp:id"
         cursorTimestamp = parts.slice(0, -1).join(':');
         cursorId = parts[parts.length - 1];
       } else {
-        // Format: just timestamp
         cursorTimestamp = cursor;
       }
       
-      // ✅ Parse the date regardless of format
       const parsedDate = parseCursorDate(cursorTimestamp);
       if (parsedDate) {
         cursorTimestamp = parsedDate;
@@ -56,7 +48,7 @@ exports.getFeed = async (req, res) => {
 
     console.log(`⚠️ Feed cache MISS for user ${userId}`);
 
-    // Build query
+    // Build query with filters for blocked salons and hidden posts
     let query = `
       SELECT 
         p.id,
@@ -86,10 +78,26 @@ exports.getFeed = async (req, res) => {
       FROM salon_posts p
       JOIN salons s ON s.id = p.salon_id
       WHERE p.visibility = 'public'
+        
+        -- ✅ EXCLUDE blocked salons (NEW)
+        AND NOT EXISTS (
+          SELECT 1 
+          FROM blocked_salons bs 
+          WHERE bs.user_id = $1 
+            AND bs.salon_id = s.id
+        )
+        
+        -- ✅ EXCLUDE hidden posts (NEW)
+        AND NOT EXISTS (
+          SELECT 1 
+          FROM hidden_posts hp 
+          WHERE hp.user_id = $1 
+            AND hp.post_id = p.id
+        )
     `;
 
-    const params = [];
-    let paramIndex = 1;
+    const params = [userId];
+    let paramIndex = 2;
 
     // Use composite cursor
     if (cursorTimestamp) {
@@ -159,11 +167,10 @@ exports.getFeed = async (req, res) => {
       });
     }
 
-    // Create next cursor with BOTH timestamp and id
+    // Create next cursor
     let nextCursor = null;
     if (hasMore && posts.length > 0) {
       const lastPost = posts[posts.length - 1];
-      // ✅ Use ISO string for consistent format
       const isoDate = new Date(lastPost.createdAt).toISOString();
       nextCursor = `${isoDate}:${lastPost.id}`;
     }
@@ -187,18 +194,304 @@ exports.getFeed = async (req, res) => {
     });
   }
 };
+// ===============================
+// BLOCK A SALON
+// ===============================
+exports.blockSalon = async (req, res) => {
+  const client = await db.pool.connect();
+  
+  try {
+    const userId = req.user?.id;
+    const { salonId } = req.params;
+    const { reason } = req.body;
 
-// Helper function to parse any date format into PostgreSQL-compatible timestamp
+    console.log('\n🚫 ===== BLOCK SALON =====');
+    console.log('📌 User ID:', userId);
+    console.log('📌 Salon ID:', salonId);
+    console.log('📌 Reason:', reason);
+
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized",
+      });
+    }
+
+    if (!salonId) {
+      return res.status(400).json({
+        success: false,
+        message: "Salon ID is required",
+      });
+    }
+
+    // Check if salon exists
+    const salonCheck = await client.query(
+      `SELECT id FROM salons WHERE id = $1`,
+      [salonId]
+    );
+
+    if (salonCheck.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({
+        success: false,
+        message: "Salon not found",
+      });
+    }
+
+    await client.query('BEGIN');
+
+    // Check if already blocked
+    const existingBlock = await client.query(
+      `SELECT 1 FROM blocked_salons WHERE user_id = $1 AND salon_id = $2`,
+      [userId, salonId]
+    );
+
+    if (existingBlock.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        success: false,
+        message: "Salon already blocked",
+      });
+    }
+
+    // Insert block
+    await client.query(
+      `INSERT INTO blocked_salons (user_id, salon_id, reason) 
+       VALUES ($1, $2, $3)`,
+      [userId, salonId, reason || 'user_requested']
+    );
+
+    await client.query('COMMIT');
+    console.log('✅ Salon blocked successfully');
+
+    // Invalidate feed cache for this user
+    await cache.deletePattern(`feed:${userId}:*`);
+    console.log('🗑️ Feed cache invalidated for user:', userId);
+
+    return res.json({
+      success: true,
+      message: "Salon blocked successfully",
+      blocked: true,
+    });
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error("❌ Block Salon Error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to block salon",
+      error: error.message
+    });
+  } finally {
+    client.release();
+  }
+};
+
+// ===============================
+// UNBLOCK A SALON
+// ===============================
+exports.unblockSalon = async (req, res) => {
+  const client = await db.pool.connect();
+  
+  try {
+    const userId = req.user?.id;
+    const { salonId } = req.params;
+
+    console.log('\n🔓 ===== UNBLOCK SALON =====');
+    console.log('📌 User ID:', userId);
+    console.log('📌 Salon ID:', salonId);
+
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized",
+      });
+    }
+
+    await client.query('BEGIN');
+
+    const result = await client.query(
+      `DELETE FROM blocked_salons 
+       WHERE user_id = $1 AND salon_id = $2 
+       RETURNING id`,
+      [userId, salonId]
+    );
+
+    await client.query('COMMIT');
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Block not found",
+      });
+    }
+
+    console.log('✅ Salon unblocked successfully');
+
+    // Invalidate feed cache
+    await cache.deletePattern(`feed:${userId}:*`);
+
+    return res.json({
+      success: true,
+      message: "Salon unblocked successfully",
+      unblocked: true,
+    });
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error("❌ Unblock Salon Error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to unblock salon",
+    });
+  } finally {
+    client.release();
+  }
+};
+
+// ===============================
+// HIDE A SINGLE POST
+// ===============================
+exports.hidePost = async (req, res) => {
+  const client = await db.pool.connect();
+  
+  try {
+    const userId = req.user?.id;
+    const { postId } = req.params;
+
+    console.log('\n👁️ ===== HIDE POST =====');
+    console.log('📌 User ID:', userId);
+    console.log('📌 Post ID:', postId);
+
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized",
+      });
+    }
+
+    if (!postId) {
+      return res.status(400).json({
+        success: false,
+        message: "Post ID is required",
+      });
+    }
+
+    // Check if post exists
+    const postCheck = await client.query(
+      `SELECT id FROM salon_posts WHERE id = $1`,
+      [postId]
+    );
+
+    if (postCheck.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({
+        success: false,
+        message: "Post not found",
+      });
+    }
+
+    await client.query('BEGIN');
+
+    // Check if already hidden
+    const existingHide = await client.query(
+      `SELECT 1 FROM hidden_posts WHERE user_id = $1 AND post_id = $2`,
+      [userId, postId]
+    );
+
+    if (existingHide.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        success: false,
+        message: "Post already hidden",
+      });
+    }
+
+    // Insert hidden post
+    await client.query(
+      `INSERT INTO hidden_posts (user_id, post_id) 
+       VALUES ($1, $2)`,
+      [userId, postId]
+    );
+
+    await client.query('COMMIT');
+    console.log('✅ Post hidden successfully');
+
+    // Invalidate feed cache
+    await cache.deletePattern(`feed:${userId}:*`);
+
+    return res.json({
+      success: true,
+      message: "Post hidden successfully",
+      hidden: true,
+    });
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error("❌ Hide Post Error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to hide post",
+    });
+  } finally {
+    client.release();
+  }
+};
+
+// ===============================
+// GET BLOCKED SALONS (Optional)
+// ===============================
+exports.getBlockedSalons = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized",
+      });
+    }
+
+    const result = await db.query(
+      `
+      SELECT 
+        bs.id,
+        bs.salon_id,
+        bs.reason,
+        bs.created_at,
+        s.name as salon_name,
+        s.logo_url as salon_logo
+      FROM blocked_salons bs
+      JOIN salons s ON s.id = bs.salon_id
+      WHERE bs.user_id = $1
+      ORDER BY bs.created_at DESC
+      `,
+      [userId]
+    );
+
+    return res.json({
+      success: true,
+      blockedSalons: result.rows,
+    });
+
+  } catch (error) {
+    console.error("❌ Get Blocked Salons Error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to get blocked salons",
+    });
+  }
+};
+
+// Helper function to parse cursor date
 function parseCursorDate(cursorDate) {
   if (!cursorDate) return null;
   
-  // If it's already in ISO format (YYYY-MM-DDTHH:mm:ss.sssZ)
   if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(cursorDate)) {
     return cursorDate;
   }
   
   try {
-    // Try to parse JavaScript Date string
     const date = new Date(cursorDate);
     if (!isNaN(date.getTime())) {
       return date.toISOString();
@@ -209,6 +502,20 @@ function parseCursorDate(cursorDate) {
   
   return null;
 }
+
+// Helper to delete cache by pattern
+cache.deletePattern = async (pattern) => {
+  try {
+    const keys = await cache.keys(pattern);
+    if (keys.length > 0) {
+      await cache.del(keys);
+      console.log(`🗑️ Deleted ${keys.length} cache keys matching pattern: ${pattern}`);
+    }
+  } catch (error) {
+    console.error('⚠️ Cache deletion error:', error);
+  }
+};
+
 /**
  * POST /api/posts/:postId/like
  * Toggle like on a post
@@ -419,5 +726,101 @@ exports.getLikesBatch = async (req, res) => {
       success: false,
       message: "Failed to get likes",
     });
+  }
+}; 
+
+// ===============================
+// REPORT A POST
+// ===============================
+exports.reportPost = async (req, res) => {
+  const client = await db.pool.connect();
+  
+  try {
+    const userId = req.user?.id;
+    const { postId } = req.params;
+    const { reason } = req.body;
+
+    console.log('\n🚩 ===== REPORT POST =====');
+    console.log('📌 User ID:', userId);
+    console.log('📌 Post ID:', postId);
+    console.log('📌 Reason:', reason);
+
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized",
+      });
+    }
+
+    if (!postId) {
+      return res.status(400).json({
+        success: false,
+        message: "Post ID is required",
+      });
+    }
+
+    if (!reason) {
+      return res.status(400).json({
+        success: false,
+        message: "Reason is required",
+      });
+    }
+
+    // Check if post exists
+    const postCheck = await client.query(
+      `SELECT id FROM salon_posts WHERE id = $1`,
+      [postId]
+    );
+
+    if (postCheck.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({
+        success: false,
+        message: "Post not found",
+      });
+    }
+
+    await client.query('BEGIN');
+
+    // Check if user already reported this post
+    const existingReport = await client.query(
+      `SELECT 1 FROM post_reports WHERE post_id = $1 AND reporter_id = $2 AND status = 'pending'`,
+      [postId, userId]
+    );
+
+    if (existingReport.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        success: false,
+        message: "You have already reported this post",
+      });
+    }
+
+    // Insert report
+    await client.query(
+      `INSERT INTO post_reports (post_id, reporter_id, reason, status) 
+       VALUES ($1, $2, $3, 'pending')`,
+      [postId, userId, reason]
+    );
+
+    await client.query('COMMIT');
+    console.log('✅ Post reported successfully');
+
+    return res.json({
+      success: true,
+      message: "Post reported successfully",
+      reported: true,
+    });
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error("❌ Report Post Error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to report post",
+      error: error.message
+    });
+  } finally {
+    client.release();
   }
 };
