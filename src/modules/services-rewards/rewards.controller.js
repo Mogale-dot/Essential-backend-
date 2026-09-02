@@ -140,6 +140,8 @@ exports.getRewards = async (req, res) => {
 
     const rewards = result.rows;
     console.log(`📊 Database returned ${rewards.length} rewards for salon ${salonId}`);
+   
+
 
     await cache.set(cacheKey, rewards, 300); // 5 minutes
 
