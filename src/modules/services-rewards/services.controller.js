@@ -1,4 +1,3 @@
- 
 const db = require('../../config/db');
 
 /**
@@ -28,6 +27,7 @@ exports.getServices = async (req, res, next) => {
         price,
         points,
         image_url,
+        video_url,
         created_at
       FROM services
       WHERE salon_id = $1
@@ -53,7 +53,7 @@ exports.createServices = async (req, res, next) => {
   try {
     // 🔑 Derive salonId (DO NOT trust req.user.salonId)
     const salonRes = await client.query(
-       `SELECT id FROM salons WHERE owner_id = $1`,
+      `SELECT id FROM salons WHERE owner_id = $1`,
       [req.user.id]
     );
 
@@ -73,7 +73,14 @@ exports.createServices = async (req, res, next) => {
     const inserted = [];
 
     for (const service of services) {
-      const { name, category, description, price ,image_url} = service;
+      const {
+        name,
+        category,
+        description,
+        price,
+        image_url,
+        video_url,
+      } = service;
 
       if (!name || price === undefined) {
         throw new Error('Service name and price are required');
@@ -84,11 +91,20 @@ exports.createServices = async (req, res, next) => {
       const { rows } = await client.query(
         `
         INSERT INTO services
-        (salon_id, name, category, description, price, image_url,points)
-        VALUES ($1, $2, $3, $4, $5, $6,$7)
+        (salon_id, name, category, description, price, image_url, points, video_url)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         RETURNING *
         `,
-        [salonId, name, category || null, description || null, price,image_url ,points]
+        [
+          salonId,
+          name,
+          category || null,
+          description || null,
+          price,
+          image_url || null,
+          points,
+          video_url || null,
+        ]
       );
 
       inserted.push(rows[0]);
@@ -105,7 +121,6 @@ exports.createServices = async (req, res, next) => {
   }
 };
 
-
 /**
  * UPDATE single service
  */
@@ -113,7 +128,14 @@ exports.updateService = async (req, res, next) => {
   try {
     const salonId = req.user.salonId;
     const { serviceId } = req.params;
-    const { name, category, description, price } = req.body;
+    const {
+      name,
+      category,
+      description,
+      price,
+      image_url,
+      video_url,
+    } = req.body;
 
     const points =
       price !== undefined ? Math.floor(Number(price) / 10) : undefined;
@@ -126,13 +148,25 @@ exports.updateService = async (req, res, next) => {
         category = COALESCE($2, category),
         description = COALESCE($3, description),
         price = COALESCE($4, price),
-        points = COALESCE($5, points)
-      WHERE id = $6
-        AND salon_id = $7
+        points = COALESCE($5, points),
+        image_url = COALESCE($6, image_url),
+        video_url = COALESCE($7, video_url)
+      WHERE id = $8
+        AND salon_id = $9
         AND is_active = true
       RETURNING *
       `,
-      [name, category, description, price, points, serviceId, salonId]
+      [
+        name,
+        category,
+        description,
+        price,
+        points,
+        image_url,
+        video_url,
+        serviceId,
+        salonId,
+      ]
     );
 
     if (!rowCount) {
