@@ -301,6 +301,7 @@ exports.getSalonServices = async (req, res) => {
         price,
         points,
         image_url,
+        video_url,
         created_at
       FROM services
       WHERE salon_id = $1
@@ -318,6 +319,7 @@ exports.getSalonServices = async (req, res) => {
       price: s.price,
       points: s.points,
       imageUrl: s.image_url,
+      videoUrl: s.video_url,
       createdAt: s.created_at
     }));
 
